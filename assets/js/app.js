@@ -404,6 +404,10 @@ createApp({
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;');
 
+        const buildDataUrl = (html) => {
+            return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+        };
+
         const buildLocalImageFrameSrcdoc = (promptText) => {
             const sanitizedPrompt = String(promptText || '').trim();
             const { width, height } = getImageGenDimensions();
@@ -677,7 +681,7 @@ start();
             }
 
             const frameHeight = getImageGenFrameHeight();
-            const srcdoc = escapeHtmlAttribute(buildLocalImageFrameSrcdoc(sanitizedPrompt));
+            const iframeSrc = escapeHtmlAttribute(buildDataUrl(buildLocalImageFrameSrcdoc(sanitizedPrompt)));
             const promptPreview = escapeHtmlText(sanitizedPrompt.length > 120 ? sanitizedPrompt.slice(0, 120) + '...' : sanitizedPrompt);
 
             return `<div class="my-3 overflow-hidden rounded-2xl border border-sky-100 bg-gradient-to-br from-sky-50 via-white to-indigo-50 shadow-sm">
@@ -688,7 +692,7 @@ start();
         </div>
         <div class="text-[11px] text-slate-400 font-mono">${getImageGenDimensions().width} x ${getImageGenDimensions().height}</div>
     </div>
-    <iframe class="block w-full" style="height:${frameHeight}px;border:0;background:transparent;" sandbox="allow-scripts" srcdoc="${srcdoc}"></iframe>
+    <iframe class="block w-full" style="height:${frameHeight}px;border:0;background:transparent;" sandbox="allow-scripts" src="${iframeSrc}"></iframe>
 </div>`;
         };
 
@@ -1823,6 +1827,7 @@ start();
                     const re = new RegExp(regexPattern, flags);
 
                     if (script.name === 'NAI画图正则' && settings.imageGenProvider === 'local-api') {
+                        result = result.replace(/<image>\s*image###([\s\S]*?)###\s*<\/image>/gi, (_, promptText = '') => buildLocalImageRenderer(promptText));
                         result = result.replace(re, (_, promptText = '') => buildLocalImageRenderer(promptText));
                         return;
                     }
