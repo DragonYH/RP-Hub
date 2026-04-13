@@ -1301,6 +1301,23 @@ start();
             }
         }, { deep: true });
 
+        const validateImageGenConfig = () => {
+            if (settings.imageGenProvider === 'local-api') {
+                if (!settings.imageGenApiUrl || settings.imageGenApiUrl.trim() === '') {
+                    showToast('缺少文生图接口地址，请前往设置中配置', 'error');
+                    return false;
+                }
+                return true;
+            }
+
+            if (!settings.imageGenKey || settings.imageGenKey.trim() === '') {
+                showToast('缺少生图密钥，请前往设置中配置', 'error');
+                return false;
+            }
+
+            return true;
+        };
+
         // Auto Image Gen & Stream Linkage
         const isAutoImageGenEnabled = computed({
             get: () => {
@@ -1308,9 +1325,7 @@ start();
                 return entry ? entry.enabled : false;
             },
             set: (val) => {
-                // 如果要开启生图，必须先检查密钥
-                if (val && (!settings.imageGenKey || settings.imageGenKey.trim() === '')) {
-                    showToast('缺少生图密钥，请前往设置中配置', 'error');
+                if (val && !validateImageGenConfig()) {
                     return;
                 }
 
@@ -6481,6 +6496,10 @@ ${textContent}`;
             showAutoImageGenModal,
 
             setAutoImageGen: (enabled) => {
+                if (enabled && !validateImageGenConfig()) {
+                    showAutoImageGenModal.value = false;
+                    return;
+                }
                 const autoImageGenWIName = '自动生图';
                 const entry = worldInfo.value.find(w => w.comment === autoImageGenWIName);
                 if (entry) {
