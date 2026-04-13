@@ -1923,9 +1923,16 @@
                                                     imageGenLatency }}ms</span>
                                             </div>
                                             <div class="text-[10px] text-gray-500 truncate">
-                                                <span v-if="imageGenStatus === 'connected'">正常<span
-                                                        v-if="quotaLoading">（获取中...）</span><span v-else>（{{ quotaError ?
-                                                        '查询失败' : (quotaValue / 10).toFixed(1) + '%' }}）</span></span>
+                                                <span v-if="imageGenStatus === 'connected'">
+                                                    <template v-if="settings.imageGenProvider === 'std'">
+                                                        正常<span v-if="quotaLoading">（获取中...）</span><span
+                                                            v-else>（{{ quotaError ? '查询失败' : (quotaValue / 10).toFixed(1)
+                                                            + '%' }}）</span>
+                                                    </template>
+                                                    <template v-else>
+                                                        本地 Flask 服务正常
+                                                    </template>
+                                                </span>
                                                 <span v-else-if="imageGenStatus === 'checking'">检测中...</span>
                                                 <span v-else-if="imageGenStatus === 'error'">连接失败</span>
                                                 <span v-else>未检测</span>
@@ -2161,8 +2168,23 @@
                                                 class="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-teal-500 hover:accent-teal-400 transition-all">
                                         </div>
 
-                                        <!-- Image Key -->
+                                        <!-- Image Provider -->
                                         <div
+                                            class="bg-gray-50 p-4 rounded-xl border border-gray-100 hover:bg-white hover:border-gray-200 hover:shadow-sm transition-all duration-200 flex flex-col justify-center">
+                                            <label
+                                                class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">文生图服务</label>
+                                            <select v-model="settings.imageGenProvider"
+                                                class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm">
+                                                <option value="std">云端直链生图</option>
+                                                <option value="local-api">本地 Flask API</option>
+                                            </select>
+                                            <div class="mt-2 text-[11px] leading-5 text-gray-400">
+                                                本地模式将调用 `api_server.py` 提供的 `/health`、`/generate`、`/status/:id` 与 `/image/:filename`。
+                                            </div>
+                                        </div>
+
+                                        <!-- Image Key -->
+                                        <div v-if="settings.imageGenProvider === 'std'"
                                             class="bg-gray-50 p-4 rounded-xl border border-gray-100 hover:bg-white hover:border-gray-200 hover:shadow-sm transition-all duration-200 flex flex-col justify-center">
                                             <label
                                                 class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">自动生图密钥</label>
@@ -2171,8 +2193,21 @@
                                                 placeholder="STD-...">
                                         </div>
 
+                                        <!-- Local Image API -->
+                                        <div v-else
+                                            class="bg-gray-50 p-4 rounded-xl border border-gray-100 hover:bg-white hover:border-gray-200 hover:shadow-sm transition-all duration-200 flex flex-col justify-center">
+                                            <label
+                                                class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">文生图接口地址</label>
+                                            <input v-model.trim="settings.imageGenApiUrl" type="text"
+                                                class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm font-mono"
+                                                placeholder="http://127.0.0.1:60003">
+                                            <div class="mt-2 text-[11px] leading-5 text-gray-400">
+                                                默认建议直接指向本机 `api_server.py`，例如 `http://127.0.0.1:60003`。
+                                            </div>
+                                        </div>
+
                                         <!-- Image Style -->
-                                        <div
+                                        <div v-if="settings.imageGenProvider === 'std'"
                                             class="bg-gray-50 p-4 rounded-xl border border-gray-100 hover:bg-white hover:border-gray-200 hover:shadow-sm transition-all duration-200 flex flex-col justify-center">
                                             <label
                                                 class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">生图风格</label>
@@ -2194,6 +2229,39 @@
                                                 <option value="横图">横图</option>
                                                 <option value="方图">方图</option>
                                             </select>
+                                        </div>
+
+                                        <!-- Local Seed -->
+                                        <div v-if="settings.imageGenProvider === 'local-api'"
+                                            class="bg-gray-50 p-4 rounded-xl border border-gray-100 hover:bg-white hover:border-gray-200 hover:shadow-sm transition-all duration-200 flex flex-col justify-center">
+                                            <label
+                                                class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">随机种子</label>
+                                            <input v-model.trim="settings.imageGenSeed" type="text"
+                                                class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm font-mono"
+                                                placeholder="留空则使用服务端默认 seed">
+                                            <div class="mt-2 text-[11px] leading-5 text-gray-400">
+                                                仅支持非负整数；留空时将沿用 `api_server.py` 内部默认种子逻辑。
+                                            </div>
+                                        </div>
+
+                                        <!-- Local Dimensions -->
+                                        <div v-if="settings.imageGenProvider === 'local-api'"
+                                            class="bg-gray-50 p-4 rounded-xl border border-gray-100 hover:bg-white hover:border-gray-200 hover:shadow-sm transition-all duration-200 flex flex-col justify-center">
+                                            <label
+                                                class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">自定义尺寸</label>
+                                            <div class="grid grid-cols-2 gap-3">
+                                                <input v-model.number="settings.imageGenWidth" type="number" min="64"
+                                                    step="64"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm"
+                                                    placeholder="宽度">
+                                                <input v-model.number="settings.imageGenHeight" type="number" min="64"
+                                                    step="64"
+                                                    class="w-full bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 text-sm focus:ring-2 focus:ring-teal-100 focus:border-teal-400 focus:outline-none transition-all shadow-sm"
+                                                    placeholder="高度">
+                                            </div>
+                                            <div class="mt-2 text-[11px] leading-5 text-gray-400">
+                                                留空时会按当前“生图比例”自动映射为预设宽高。
+                                            </div>
                                         </div>
                                     </div>
                                 </div>

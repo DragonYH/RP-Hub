@@ -58,6 +58,13 @@ createApp({
             fastModel: '',
             suggestionModel: ''
         };
+        const DEFAULT_IMAGE_GEN_CONFIG = {
+            provider: 'std',
+            apiUrl: 'http://127.0.0.1:60003',
+            seed: '',
+            width: '',
+            height: ''
+        };
 
         // --- State ---
         const currentView = ref('chat');
@@ -84,6 +91,14 @@ createApp({
         const quotaAvailable = ref(false);
 
         const fetchQuota = async () => {
+            if (settings.imageGenProvider === 'local-api') {
+                quotaLoading.value = false;
+                quotaError.value = false;
+                quotaAvailable.value = true;
+                quotaValue.value = 0;
+                return;
+            }
+
             quotaLoading.value = true;
             quotaError.value = false;
             try {
@@ -322,7 +337,12 @@ createApp({
             maxRetries: 2,
             renderLayerLimit: 25,
             autoSummarizeLimit: 0,
+            imageGenProvider: DEFAULT_IMAGE_GEN_CONFIG.provider,
             imageGenKey: '',
+            imageGenApiUrl: DEFAULT_IMAGE_GEN_CONFIG.apiUrl,
+            imageGenSeed: DEFAULT_IMAGE_GEN_CONFIG.seed,
+            imageGenWidth: DEFAULT_IMAGE_GEN_CONFIG.width,
+            imageGenHeight: DEFAULT_IMAGE_GEN_CONFIG.height,
             imageStyle: 'vertical',
             imageSize: '竖图',
             qualityModel: DEFAULT_API_CONFIG.qualityModel,
@@ -330,6 +350,347 @@ createApp({
             fastModel: DEFAULT_API_CONFIG.fastModel,
             suggestionModel: DEFAULT_API_CONFIG.suggestionModel
         });
+
+        const getImageSizePreset = () => {
+            const presetMap = {
+                '竖图': { width: 832, height: 1216 },
+                '横图': { width: 1216, height: 832 },
+                '方图': { width: 1024, height: 1024 }
+            };
+            return presetMap[settings.imageSize] || presetMap['方图'];
+        };
+
+        const getImageGenDimensions = () => {
+            const preset = getImageSizePreset();
+            const width = Number(settings.imageGenWidth);
+            const height = Number(settings.imageGenHeight);
+            return {
+                width: Number.isFinite(width) && width > 0 ? Math.round(width) : preset.width,
+                height: Number.isFinite(height) && height > 0 ? Math.round(height) : preset.height
+            };
+        };
+
+        const getImageGenFrameHeight = () => {
+            const { width, height } = getImageGenDimensions();
+            if (!width || !height) return 420;
+            const ratio = height / width;
+            return Math.max(300, Math.min(620, Math.round(520 * ratio)));
+        };
+
+        const getImageGenSeed = () => {
+            const rawSeed = String(settings.imageGenSeed ?? '').trim();
+            if (!rawSeed) return null;
+            const numericSeed = Number(rawSeed);
+            if (!Number.isInteger(numericSeed) || numericSeed < 0) {
+                return null;
+            }
+            return numericSeed;
+        };
+
+        const getImageGenServiceBaseUrl = () => {
+            const fallbackUrl = DEFAULT_IMAGE_GEN_CONFIG.apiUrl;
+            const rawUrl = String(settings.imageGenApiUrl || fallbackUrl).trim();
+            return rawUrl.replace(/\/+$/, '');
+        };
+
+        const escapeHtmlAttribute = (value) => String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+
+        const escapeHtmlText = (value) => String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+
+        const buildLocalImageFrameSrcdoc = (promptText) => {
+            const sanitizedPrompt = String(promptText || '').trim();
+            const { width, height } = getImageGenDimensions();
+            const seed = getImageGenSeed();
+            const payload = {
+                prompt: sanitizedPrompt,
+                width,
+                height
+            };
+            if (seed !== null) {
+                payload.seed = seed;
+            }
+
+            const apiBaseUrl = getImageGenServiceBaseUrl();
+            const scriptPayload = JSON.stringify(payload).replace(/</g, '\\u003c');
+            const scriptApiBase = JSON.stringify(apiBaseUrl).replace(/</g, '\\u003c');
+            const previewPrompt = escapeHtmlText(sanitizedPrompt || '未提供提示词');
+
+            return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: linear-gradient(160deg, #eff6ff 0%, #f8fbff 55%, #eef2ff 100%);
+    color: #1f2937;
+}
+body {
+    display: flex;
+    align-items: stretch;
+    justify-content: center;
+}
+.shell {
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    padding: 14px;
+}
+.panel {
+    width: 100%;
+    height: 100%;
+    border-radius: 18px;
+    overflow: hidden;
+    border: 1px solid rgba(96, 165, 250, 0.25);
+    background: rgba(255, 255, 255, 0.92);
+    box-shadow: 0 14px 32px rgba(59, 130, 246, 0.12);
+    display: flex;
+    flex-direction: column;
+}
+.meta {
+    padding: 12px 14px 10px;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+    background: linear-gradient(135deg, rgba(239, 246, 255, 0.95), rgba(238, 242, 255, 0.95));
+}
+.badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: rgba(37, 99, 235, 0.08);
+    color: #1d4ed8;
+    font-size: 12px;
+    font-weight: 700;
+}
+.prompt {
+    margin-top: 8px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #475569;
+    word-break: break-word;
+}
+.viewer {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 14px;
+    background:
+        radial-gradient(circle at top left, rgba(96, 165, 250, 0.14), transparent 38%),
+        radial-gradient(circle at bottom right, rgba(99, 102, 241, 0.14), transparent 40%),
+        linear-gradient(180deg, rgba(248, 250, 252, 0.96), rgba(255, 255, 255, 0.96));
+}
+.status {
+    position: absolute;
+    left: 14px;
+    right: 14px;
+    bottom: 12px;
+    padding: 9px 12px;
+    border-radius: 12px;
+    background: rgba(15, 23, 42, 0.72);
+    color: #f8fafc;
+    font-size: 12px;
+    backdrop-filter: blur(8px);
+}
+.loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    color: #334155;
+}
+.spinner {
+    width: 34px;
+    height: 34px;
+    border-radius: 999px;
+    border: 3px solid rgba(148, 163, 184, 0.28);
+    border-top-color: #2563eb;
+    animation: spin 1s linear infinite;
+}
+.image {
+    display: none;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    border-radius: 14px;
+    box-shadow: 0 18px 36px rgba(15, 23, 42, 0.14);
+}
+.error {
+    display: none;
+    padding: 12px 14px;
+    border-radius: 14px;
+    background: rgba(254, 242, 242, 0.95);
+    color: #b91c1c;
+    font-size: 13px;
+    line-height: 1.6;
+    border: 1px solid rgba(248, 113, 113, 0.28);
+}
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+</style>
+</head>
+<body>
+<div class="shell">
+    <div class="panel">
+        <div class="meta">
+            <span class="badge">本地文生图</span>
+            <div class="prompt">${previewPrompt}</div>
+        </div>
+        <div class="viewer">
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <div>正在提交到本地 ComfyUI 队列...</div>
+            </div>
+            <img id="image" class="image" alt="生成图片">
+            <div id="error" class="error"></div>
+            <div id="status" class="status">等待任务开始</div>
+        </div>
+    </div>
+</div>
+<script>
+const apiBaseUrl = ${scriptApiBase};
+const payload = ${scriptPayload};
+const statusEl = document.getElementById('status');
+const loadingEl = document.getElementById('loading');
+const imageEl = document.getElementById('image');
+const errorEl = document.getElementById('error');
+
+const setStatus = (message) => {
+    statusEl.textContent = message;
+};
+
+const setError = (message) => {
+    loadingEl.style.display = 'none';
+    imageEl.style.display = 'none';
+    errorEl.style.display = 'block';
+    errorEl.textContent = message;
+    setStatus('生成失败');
+};
+
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+const extractFirstImage = (historyData, promptId) => {
+    const historyEntry = historyData?.[promptId] || Object.values(historyData || {})[0];
+    const outputs = historyEntry?.outputs || {};
+    for (const node of Object.values(outputs)) {
+        if (Array.isArray(node?.images) && node.images.length > 0) {
+            return node.images[0];
+        }
+    }
+    return null;
+};
+
+const waitForImage = (src) => new Promise((resolve, reject) => {
+    imageEl.onload = resolve;
+    imageEl.onerror = () => reject(new Error('图片资源加载失败'));
+    imageEl.src = src;
+});
+
+const pollResult = async (promptId) => {
+    for (let attempt = 0; attempt < 60; attempt++) {
+        const response = await fetch(apiBaseUrl + '/status/' + encodeURIComponent(promptId), {
+            method: 'GET',
+            cache: 'no-store'
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data?.error || '状态查询失败');
+        }
+
+        const image = extractFirstImage(data, promptId);
+        if (image) {
+            return image;
+        }
+
+        setStatus('任务执行中，正在轮询结果... ' + (attempt + 1) + '/60');
+        await delay(1500);
+    }
+
+    throw new Error('等待图片生成超时，请检查 ComfyUI 是否仍在执行任务');
+};
+
+const start = async () => {
+    if (!payload.prompt) {
+        setError('提示词为空，无法生成图片');
+        return;
+    }
+
+    try {
+        setStatus('正在创建文生图任务...');
+        const generateResponse = await fetch(apiBaseUrl + '/generate', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+        const generateData = await generateResponse.json();
+        if (!generateResponse.ok || !generateData?.prompt_id) {
+            throw new Error(generateData?.error || '文生图任务提交失败');
+        }
+
+        setStatus('任务已创建，等待 ComfyUI 返回图片...');
+        const imageMeta = await pollResult(generateData.prompt_id);
+        const query = new URLSearchParams({
+            subfolder: imageMeta.subfolder || '',
+            type: imageMeta.type || 'output',
+            _: Date.now().toString()
+        });
+        const imageUrl = apiBaseUrl + '/image/' + encodeURIComponent(imageMeta.filename) + '?' + query.toString();
+
+        await waitForImage(imageUrl);
+        loadingEl.style.display = 'none';
+        errorEl.style.display = 'none';
+        imageEl.style.display = 'block';
+        setStatus('图片生成完成');
+    } catch (error) {
+        setError(error?.message || '文生图服务调用失败');
+    }
+};
+
+start();
+</script>
+</body>
+</html>`;
+        };
+
+        const buildLocalImageRenderer = (promptText) => {
+            const sanitizedPrompt = String(promptText || '').trim();
+            if (!sanitizedPrompt) {
+                return '<div class="my-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">图片提示词为空，已跳过文生图请求。</div>';
+            }
+
+            const frameHeight = getImageGenFrameHeight();
+            const srcdoc = escapeHtmlAttribute(buildLocalImageFrameSrcdoc(sanitizedPrompt));
+            const promptPreview = escapeHtmlText(sanitizedPrompt.length > 120 ? sanitizedPrompt.slice(0, 120) + '...' : sanitizedPrompt);
+
+            return `<div class="my-3 overflow-hidden rounded-2xl border border-sky-100 bg-gradient-to-br from-sky-50 via-white to-indigo-50 shadow-sm">
+    <div class="flex items-center justify-between gap-3 px-4 py-3 border-b border-sky-100 bg-white/80">
+        <div class="min-w-0">
+            <div class="text-xs font-bold tracking-wide text-sky-700 uppercase">本地文生图</div>
+            <div class="mt-1 text-xs text-slate-500 truncate">${promptPreview}</div>
+        </div>
+        <div class="text-[11px] text-slate-400 font-mono">${getImageGenDimensions().width} x ${getImageGenDimensions().height}</div>
+    </div>
+    <iframe class="block w-full" style="height:${frameHeight}px;border:0;background:transparent;" sandbox="allow-scripts" srcdoc="${srcdoc}"></iframe>
+</div>`;
+        };
 
         const syncSettingsToGenerator = () => {
             const iframe = document.querySelector('iframe[src*="character"]');
@@ -394,7 +755,20 @@ createApp({
         }, { deep: true });
 
         // Watch image gen and model settings for sync
-        watch(() => [settings.imageGenKey, settings.imageStyle, settings.qualityModel, settings.balancedModel, settings.fastModel, settings.suggestionModel], () => {
+        watch(() => [
+            settings.imageGenProvider,
+            settings.imageGenKey,
+            settings.imageGenApiUrl,
+            settings.imageGenSeed,
+            settings.imageGenWidth,
+            settings.imageGenHeight,
+            settings.imageStyle,
+            settings.imageSize,
+            settings.qualityModel,
+            settings.balancedModel,
+            settings.fastModel,
+            settings.suggestionModel
+        ], () => {
             syncSettingsToGenerator();
         });
 
@@ -1433,6 +1807,11 @@ createApp({
 
                     const re = new RegExp(regexPattern, flags);
 
+                    if (script.name === 'NAI画图正则' && settings.imageGenProvider === 'local-api') {
+                        result = result.replace(re, (_, promptText = '') => buildLocalImageRenderer(promptText));
+                        return;
+                    }
+
                     // --- Protection Logic Start ---
                     // 只有当正则不包含 < 或 > 且不包含 markdown 代码块标记 (```) 时，才启用 HTML/代码块保护
                     // 如果正则本身就在匹配代码块（如用户提供的 ```json ...```），则不应进行保护
@@ -1965,6 +2344,24 @@ ${rawHtml}
                 const controller = new AbortController();
                 const id = setTimeout(() => controller.abort(), 10000);
                 const startTime = performance.now();
+
+                if (settings.imageGenProvider === 'local-api') {
+                    const response = await fetch(`${getImageGenServiceBaseUrl()}/health`, {
+                        method: 'GET',
+                        signal: controller.signal
+                    });
+                    const data = await response.json().catch(() => null);
+                    clearTimeout(id);
+                    const endTime = performance.now();
+
+                    if (response.ok && data?.status === 'ok' && data?.comfyui_reachable !== false) {
+                        imageGenStatus.value = 'connected';
+                        imageGenLatency.value = Math.round(endTime - startTime);
+                    } else {
+                        imageGenStatus.value = 'error';
+                    }
+                    return;
+                }
 
                 await fetch('https://std.loliyc.com', {
                     method: 'HEAD',
@@ -3912,11 +4309,19 @@ ${textContent}`;
 
         };
 
-        watch(() => settings.imageGenKey, () => {
+        watch(() => [
+            settings.imageGenProvider,
+            settings.imageGenKey,
+            settings.imageGenApiUrl,
+            settings.imageGenSeed,
+            settings.imageGenWidth,
+            settings.imageGenHeight
+        ], debounce(() => {
             enforceSpecialRules();
             saveData();
+            checkImageGenStatus();
             fetchQuota();
-        });
+        }, 300));
         const selectCharacter = async (index, isNewImport = false) => {
             currentCharacterIndex.value = index;
             const char = characters.value[index];
