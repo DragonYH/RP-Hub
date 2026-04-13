@@ -1584,8 +1584,10 @@
                             if (mainSettings.apiKey) api.key = mainSettings.apiKey;
 
                             // Sync Image Gen
-                            // Always sync key even if empty to ensure reset
+                            options.imageGenProvider = mainSettings.imageGenProvider || 'std';
                             options.imageGenKey = mainSettings.imageGenKey || '';
+                            options.imageGenApiUrl = mainSettings.imageGenApiUrl || 'http://127.0.0.1:60003';
+                            options.imageGenSeed = mainSettings.imageGenSeed ?? '';
 
                             // Map imageStyle to avatarStyle (vertical -> default, r18 -> hentai)
                             if (mainSettings.imageStyle === 'r18') {
@@ -1618,7 +1620,10 @@
                 const defaultOptions = {
                     generateExtra: true, // Default to true as requested
                     avatarStyle: 'default',
+                    imageGenProvider: 'std',
                     imageGenKey: '',
+                    imageGenApiUrl: 'http://127.0.0.1:60003',
+                    imageGenSeed: '',
                     customModels: {
                         quality: 'gemini-3.1-pro-preview-high',
                         balanced: 'gemini-3-flash-preview-high',
@@ -2704,9 +2709,35 @@
                 });
 
                 // Avatar Helpers
+                const getAvatarImageGenServiceBaseUrl = () => {
+                    const rawUrl = String(options.imageGenApiUrl || 'http://127.0.0.1:60003').trim();
+                    return rawUrl.replace(/\/+$/, '');
+                };
+
+                const isAvatarImageGenConfigured = () => {
+                    if (options.imageGenProvider === 'local-api') {
+                        return !!getAvatarImageGenServiceBaseUrl();
+                    }
+                    return !!(options.imageGenKey && options.imageGenKey.trim());
+                };
+
                 const generateAvatarUrl = (tag) => {
                     let url;
-                    console.log('%c[Workshop Image Request]', 'color: #ec4899; font-weight: bold;', { style: options.avatarStyle, tag: tag });
+                    console.log('%c[Workshop Image Request]', 'color: #ec4899; font-weight: bold;', { provider: options.imageGenProvider, style: options.avatarStyle, tag: tag });
+
+                    if (options.imageGenProvider === 'local-api') {
+                        const query = new URLSearchParams({
+                            tag,
+                            width: '832',
+                            height: '1216'
+                        });
+                        const seedValue = String(options.imageGenSeed ?? '').trim();
+                        if (seedValue) {
+                            query.set('seed', seedValue);
+                        }
+                        return `${getAvatarImageGenServiceBaseUrl()}/generate-direct?${query.toString()}`;
+                    }
+
                     const tokenParam = options.imageGenKey ? options.imageGenKey : 'STD-QMqT4lxiWqWMVneiePiE';
                     if (options.avatarStyle === 'hentai') {
                         url = `https://std.loliyc.com/generate?tag=${encodeURIComponent(tag)}&token=${tokenParam}&model=nai-diffusion-4-5-full&artist={{artist:yd_(orange maru)}}, nixeu, {ikuchan kaoru}, cutesexyrobutts, redrop, [[artist:kojima saya]], lam_(ramdayo), oekakizuki, qiandaiyiyu, &size=竖图&steps=40&scale=6&cfg=0&sampler=k_dpmpp_2m_sde&negative={{{{bad anatomy}}}},{bad feet},bad hands,{{{bad proportions}}},{blurry},cloned face,cropped,{{{deformed}}},{{{disfigured}}},error,{{{extra arms}}},{extra digit},{{{extra legs}}},extra limbs,{{extra limbs}},{fewer digits},{{{fused fingers}}},gross proportions,ink eyes,ink hair,jpeg artifacts,{{{{long neck}}}},low quality,{malformed limbs},{{missing arms}},{missing fingers},{{missing legs}},{{{more than 2 nipples}}},mutated hands,{{{mutation}}},normal quality,owres,{{poorly drawn face}},{{poorly drawn hands}},reen eyes,signature,text,{{too many fingers}},{{{ugly}}},username,uta,watermark,worst quality,{{{more than 2 legs}}}&nocache=0&noise_schedule=karras`;
@@ -3003,8 +3034,8 @@ JSON 字段（世界书/正则脚本）必须输出为合法的 JSON 数组，**
                             }
 
                             // 提示密钥未配置
-                            if (!options.imageGenKey && currentCharacter.value.avatar_prompt) {
-                                showToast('生图密钥未配置，已跳过图片生成', 'info');
+                            if (!isAvatarImageGenConfigured() && currentCharacter.value.avatar_prompt) {
+                                showToast(options.imageGenProvider === 'local-api' ? '本地生图接口未配置，已跳过头像生成' : '生图密钥未配置，已跳过头像生成', 'info');
                             }
 
                             showToast('角色卡生成完成！', 'success');
@@ -3254,12 +3285,11 @@ JSON 字段（世界书/正则脚本）必须输出为合法的 JSON 数组，**
                                     // 只有当 Prompt 发生实质变化时才重新生成 URL，防止已缓存的 Base64 被重置为 URL 导致循环加载
                                     if (currentCharacter.value.avatar_prompt !== tag) {
                                         currentCharacter.value.avatar_prompt = tag;
-                                        // 仅在配置了密钥时才生成图片 URL 并赋值，否则保持为空或旧数据，直到最后提示用户
-                                        if (options.imageGenKey) {
+                                        if (isAvatarImageGenConfigured()) {
                                             let url = generateAvatarUrl(tag);
                                             currentCharacter.value.avatar = url;
                                         } else {
-                                            console.log('Image Generation Key is empty, skipping image request.');
+                                            console.log('Avatar image generation is not configured, skipping image request.');
                                         }
                                     }
                                 }
