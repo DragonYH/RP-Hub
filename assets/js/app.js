@@ -62,9 +62,11 @@ createApp({
             provider: 'std',
             apiUrl: 'http://127.0.0.1:60003',
             seed: '',
-            width: '',
-            height: ''
+            width: '512',
+            height: '512'
         };
+        const LOCAL_IMAGE_WORKFLOW_INPUT_DIMENSIONS = { width: 512, height: 512 };
+        const LOCAL_IMAGE_WORKFLOW_OUTPUT_DIMENSIONS = { width: 1744, height: 1744 };
 
         // --- State ---
         const currentView = ref('chat');
@@ -344,34 +346,29 @@ createApp({
             imageGenWidth: DEFAULT_IMAGE_GEN_CONFIG.width,
             imageGenHeight: DEFAULT_IMAGE_GEN_CONFIG.height,
             imageStyle: 'vertical',
-            imageSize: '竖图',
+            imageSize: '方图',
             qualityModel: DEFAULT_API_CONFIG.qualityModel,
             balancedModel: DEFAULT_API_CONFIG.balancedModel,
             fastModel: DEFAULT_API_CONFIG.fastModel,
             suggestionModel: DEFAULT_API_CONFIG.suggestionModel
         });
 
-        const getImageSizePreset = () => {
-            const presetMap = {
-                '竖图': { width: 832, height: 1216 },
-                '横图': { width: 1216, height: 832 },
-                '方图': { width: 1024, height: 1024 }
+        const getImageGenDimensions = () => {
+            return {
+                width: LOCAL_IMAGE_WORKFLOW_INPUT_DIMENSIONS.width,
+                height: LOCAL_IMAGE_WORKFLOW_INPUT_DIMENSIONS.height
             };
-            return presetMap[settings.imageSize] || presetMap['方图'];
         };
 
-        const getImageGenDimensions = () => {
-            const preset = getImageSizePreset();
-            const width = Number(settings.imageGenWidth);
-            const height = Number(settings.imageGenHeight);
+        const getImageGenOutputDimensions = () => {
             return {
-                width: Number.isFinite(width) && width > 0 ? Math.round(width) : preset.width,
-                height: Number.isFinite(height) && height > 0 ? Math.round(height) : preset.height
+                width: LOCAL_IMAGE_WORKFLOW_OUTPUT_DIMENSIONS.width,
+                height: LOCAL_IMAGE_WORKFLOW_OUTPUT_DIMENSIONS.height
             };
         };
 
         const getImageGenFrameHeight = () => {
-            const { width, height } = getImageGenDimensions();
+            const { width, height } = getImageGenOutputDimensions();
             if (!width || !height) return 420;
             const ratio = height / width;
             return Math.max(300, Math.min(620, Math.round(520 * ratio)));
@@ -404,6 +401,197 @@ createApp({
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;');
 
+        const LOCAL_IMAGE_PLACEHOLDER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+        const LOCAL_IMAGE_CACHE_DB_NAME = 'rp-hub-local-image-cache';
+        const LOCAL_IMAGE_CACHE_STORE_NAME = 'generated-images';
+        let localImageCacheDbPromise = null;
+        let localImageHydrationScheduled = false;
+        const localImageInflightRequests = new Map();
+        const localImageResolvedBlobs = new Map();
+
+        const openLocalImageCacheDb = () => {
+            if (localImageCacheDbPromise) {
+                return localImageCacheDbPromise;
+            }
+            if (typeof indexedDB === 'undefined') {
+                localImageCacheDbPromise = Promise.resolve(null);
+                return localImageCacheDbPromise;
+            }
+
+            localImageCacheDbPromise = new Promise((resolve) => {
+                const request = indexedDB.open(LOCAL_IMAGE_CACHE_DB_NAME, 1);
+                request.onupgradeneeded = () => {
+                    const db = request.result;
+                    if (!db.objectStoreNames.contains(LOCAL_IMAGE_CACHE_STORE_NAME)) {
+                        db.createObjectStore(LOCAL_IMAGE_CACHE_STORE_NAME);
+                    }
+                };
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => {
+                    console.error('打开本地图片缓存失败:', request.error);
+                    resolve(null);
+                };
+            });
+
+            return localImageCacheDbPromise;
+        };
+
+        const withLocalImageStore = async (mode, handler) => {
+            const db = await openLocalImageCacheDb();
+            if (!db) {
+                return null;
+            }
+
+            return new Promise((resolve) => {
+                const transaction = db.transaction(LOCAL_IMAGE_CACHE_STORE_NAME, mode);
+                const store = transaction.objectStore(LOCAL_IMAGE_CACHE_STORE_NAME);
+                const request = handler(store);
+                if (!request) {
+                    resolve(null);
+                    return;
+                }
+
+                request.onsuccess = () => resolve(request.result ?? null);
+                request.onerror = () => {
+                    console.error('访问本地图片缓存失败:', request.error);
+                    resolve(null);
+                };
+            });
+        };
+
+        const getCachedLocalImageBlob = async (cacheKey) => {
+            const cachedEntry = await withLocalImageStore('readonly', (store) => store.get(cacheKey));
+            if (!cachedEntry || !(cachedEntry.blob instanceof Blob)) {
+                return null;
+            }
+            return cachedEntry.blob;
+        };
+
+        const setCachedLocalImageBlob = async (cacheKey, blob, sourceUrl) => {
+            if (!(blob instanceof Blob)) {
+                return;
+            }
+            await withLocalImageStore('readwrite', (store) => store.put({
+                blob,
+                sourceUrl,
+                createdAt: Date.now()
+            }, cacheKey));
+        };
+
+        const getLocalImageBlob = async (cacheKey, imageUrl) => {
+            const memoryBlob = localImageResolvedBlobs.get(cacheKey);
+            if (memoryBlob instanceof Blob) {
+                return { blob: memoryBlob, source: 'memory' };
+            }
+
+            const cachedBlob = await getCachedLocalImageBlob(cacheKey);
+            if (cachedBlob) {
+                localImageResolvedBlobs.set(cacheKey, cachedBlob);
+                return { blob: cachedBlob, source: 'indexeddb' };
+            }
+
+            const existingRequest = localImageInflightRequests.get(cacheKey);
+            if (existingRequest) {
+                const sharedBlob = await existingRequest;
+                return { blob: sharedBlob, source: 'shared-network' };
+            }
+
+            const requestPromise = (async () => {
+                const response = await fetch(imageUrl, { cache: 'force-cache' });
+                if (!response.ok) {
+                    throw new Error(`请求失败: ${response.status}`);
+                }
+
+                const imageBlob = await response.blob();
+                await setCachedLocalImageBlob(cacheKey, imageBlob, imageUrl);
+                localImageResolvedBlobs.set(cacheKey, imageBlob);
+                return imageBlob;
+            })();
+
+            localImageInflightRequests.set(cacheKey, requestPromise);
+
+            try {
+                const imageBlob = await requestPromise;
+                return { blob: imageBlob, source: 'network' };
+            } finally {
+                if (localImageInflightRequests.get(cacheKey) === requestPromise) {
+                    localImageInflightRequests.delete(cacheKey);
+                }
+            }
+        };
+
+        const assignLocalImageObjectUrl = (imgElement, objectUrl, source) => {
+            if (!(imgElement instanceof HTMLImageElement)) {
+                return;
+            }
+            const previousObjectUrl = imgElement.dataset.objectUrl;
+            if (previousObjectUrl && previousObjectUrl.startsWith('blob:')) {
+                URL.revokeObjectURL(previousObjectUrl);
+            }
+            imgElement.dataset.objectUrl = objectUrl;
+            imgElement.dataset.localImageSource = source;
+            imgElement.src = objectUrl;
+        };
+
+        const hydrateLocalGeneratedImage = async (imgElement) => {
+            if (!(imgElement instanceof HTMLImageElement)) {
+                return;
+            }
+            if (imgElement.dataset.localImageHydrated === '1') {
+                return;
+            }
+
+            imgElement.dataset.localImageHydrated = '1';
+            const imageUrl = imgElement.dataset.localImageUrl;
+            const cacheKey = imgElement.dataset.localImageKey || imageUrl;
+
+            if (!imageUrl) {
+                imgElement.alt = '生成图片地址缺失';
+                return;
+            }
+
+            try {
+                const { blob, source } = await getLocalImageBlob(cacheKey, imageUrl);
+                assignLocalImageObjectUrl(imgElement, URL.createObjectURL(blob), source);
+            } catch (error) {
+                console.error('加载本地生成图片失败:', error);
+                imgElement.dataset.localImageSource = 'error';
+                imgElement.alt = '生成图片失败';
+                imgElement.removeAttribute('data-local-image-url');
+            }
+        };
+
+        if (typeof window !== 'undefined') {
+            window.__hydrateLocalGeneratedImage = (imgElement) => {
+                hydrateLocalGeneratedImage(imgElement).catch((error) => {
+                    console.error('初始化本地生成图片失败:', error);
+                });
+            };
+        }
+
+        const hydratePendingLocalGeneratedImages = () => {
+            if (typeof document === 'undefined') {
+                return;
+            }
+            const pendingImages = document.querySelectorAll('img[data-local-image-url]');
+            pendingImages.forEach((imgElement) => {
+                hydrateLocalGeneratedImage(imgElement).catch((error) => {
+                    console.error('批量初始化本地生成图片失败:', error);
+                });
+            });
+        };
+
+        const scheduleLocalGeneratedImageHydration = () => {
+            if (localImageHydrationScheduled || typeof window === 'undefined') {
+                return;
+            }
+            localImageHydrationScheduled = true;
+            window.requestAnimationFrame(() => {
+                localImageHydrationScheduled = false;
+                hydratePendingLocalGeneratedImages();
+            });
+        };
+
         const buildLocalImageRenderer = (promptText) => {
             const sanitizedPrompt = String(promptText || '').trim();
             if (!sanitizedPrompt) {
@@ -420,8 +608,10 @@ createApp({
             if (seed !== null) {
                 query.set('seed', String(seed));
             }
-            const imageSrc = escapeHtmlAttribute(`${getImageGenServiceBaseUrl()}/generate-direct?${query.toString()}`);
-            return `<div style="width: auto; height: auto; max-width: 100%; border: 8px solid transparent; background-image: linear-gradient(45deg, #FFC9D9, #CCE5FF); position: relative; border-radius: 16px; overflow: hidden; display: flex; justify-content: center; align-items: center; animation: gradientBG 3s ease infinite; box-shadow: 0 4px 15px rgba(204,229,255,0.3);"><div style="background: rgba(255,255,255,0.85); backdrop-filter: blur(5px); width: 100%; height: 100%; position: absolute; top: 0; left: 0;"></div><img src="${imageSrc}" alt="生成图片" style="max-width: 100%; height: auto; width: auto; display: block; object-fit: contain; transition: transform 0.3s ease; position: relative; z-index: 1;" loading="lazy" referrerpolicy="no-referrer"></div><style>@keyframes gradientBG {0% {background-image: linear-gradient(45deg, #FFC9D9, #CCE5FF);}50% {background-image: linear-gradient(225deg, #FFC9D9, #CCE5FF);}100% {background-image: linear-gradient(45deg, #FFC9D9, #CCE5FF);}}</style>`;
+            const imageUrl = `${getImageGenServiceBaseUrl()}/generate-direct?${query.toString()}`;
+            const escapedImageUrl = escapeHtmlAttribute(imageUrl);
+            const escapedCacheKey = escapeHtmlAttribute(`local-api:${imageUrl}`);
+            return `<div style="width: auto; height: auto; max-width: 100%; border: 8px solid transparent; background-image: linear-gradient(45deg, #FFC9D9, #CCE5FF); position: relative; border-radius: 16px; overflow: hidden; display: flex; justify-content: center; align-items: center; animation: gradientBG 3s ease infinite; box-shadow: 0 4px 15px rgba(204,229,255,0.3);"><div style="background: rgba(255,255,255,0.85); backdrop-filter: blur(5px); width: 100%; height: 100%; position: absolute; top: 0; left: 0;"></div><img src="${LOCAL_IMAGE_PLACEHOLDER}" data-local-image-url="${escapedImageUrl}" data-local-image-key="${escapedCacheKey}" alt="生成图片（工作流输入512x512，输出1744x1744）" style="max-width: 100%; height: auto; width: auto; display: block; object-fit: contain; transition: transform 0.3s ease; position: relative; z-index: 1;" loading="lazy" decoding="async" referrerpolicy="no-referrer"></div><style>@keyframes gradientBG {0% {background-image: linear-gradient(45deg, #FFC9D9, #CCE5FF);}50% {background-image: linear-gradient(225deg, #FFC9D9, #CCE5FF);}100% {background-image: linear-gradient(45deg, #FFC9D9, #CCE5FF);}}</style>`;
         };
 
         const replaceLocalImageBlocks = (text) => {
@@ -1918,6 +2108,9 @@ ${rawHtml}
                     resultHtml += DOMPurify.sanitize(marked.parse(postText), cleanConfig);
                 }
 
+                if (resultHtml.includes('data-local-image-url=')) {
+                    scheduleLocalGeneratedImageHydration();
+                }
                 return resultHtml;
             }
 
@@ -1928,7 +2121,11 @@ ${rawHtml}
             const startsWithBlockHtml = /^\s*<(div|table|section|article|aside|header|footer|style|script)/i.test(trimmed);
             if (startsWithBlockHtml && !trimmed.includes('```')) {
                 // Directly sanitize and return, skipping Markdown parsing
-                return DOMPurify.sanitize(processed, cleanConfig);
+                const sanitizedHtml = DOMPurify.sanitize(processed, cleanConfig);
+                if (sanitizedHtml.includes('data-local-image-url=')) {
+                    scheduleLocalGeneratedImageHydration();
+                }
+                return sanitizedHtml;
             }
 
             // For mixed content (Text + HTML widgets like HUDs/Status Bars),
@@ -2019,11 +2216,20 @@ ${rawHtml}
                     }
                 });
 
-                if (modified) return doc.body.innerHTML;
+                if (modified) {
+                    const modifiedHtml = doc.body.innerHTML;
+                    if (modifiedHtml.includes('data-local-image-url=')) {
+                        scheduleLocalGeneratedImageHydration();
+                    }
+                    return modifiedHtml;
+                }
             } catch (e) {
                 console.error('Error rendering HTML preview:', e);
             }
 
+            if (html.includes('data-local-image-url=')) {
+                scheduleLocalGeneratedImageHydration();
+            }
             return html;
         };
 
