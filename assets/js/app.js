@@ -478,7 +478,12 @@ createApp({
             }, cacheKey));
         };
 
-        const getLocalImageBlob = async (cacheKey, imageUrl) => {
+        const removeCachedLocalImageBlob = async (cacheKey) => {
+            localImageResolvedBlobs.delete(cacheKey);
+            await withLocalImageStore('readwrite', (store) => store.delete(cacheKey));
+        };
+
+        const getLocalCachedImageBlob = async (cacheKey) => {
             const memoryBlob = localImageResolvedBlobs.get(cacheKey);
             if (memoryBlob instanceof Blob) {
                 return { blob: memoryBlob, source: 'memory' };
@@ -488,6 +493,15 @@ createApp({
             if (cachedBlob) {
                 localImageResolvedBlobs.set(cacheKey, cachedBlob);
                 return { blob: cachedBlob, source: 'indexeddb' };
+            }
+
+            return null;
+        };
+
+        const requestLocalImageBlob = async (cacheKey, imageUrl) => {
+            const cachedImage = await getLocalCachedImageBlob(cacheKey);
+            if (cachedImage) {
+                return cachedImage;
             }
 
             const existingRequest = localImageInflightRequests.get(cacheKey);
@@ -516,6 +530,47 @@ createApp({
             } finally {
                 if (localImageInflightRequests.get(cacheKey) === requestPromise) {
                     localImageInflightRequests.delete(cacheKey);
+                }
+            }
+        };
+
+        const findLocalImageCardElements = (imgElement) => {
+            const cardElement = imgElement?.closest?.('[data-local-image-card]');
+            if (!cardElement) {
+                return { cardElement: null, statusElement: null, backdropElement: null, overlayElement: null };
+            }
+            return {
+                cardElement,
+                statusElement: cardElement.querySelector('[data-local-image-status]'),
+                backdropElement: cardElement.querySelector('[data-local-image-backdrop]'),
+                overlayElement: cardElement.querySelector('[data-local-image-overlay]')
+            };
+        };
+
+        const updateLocalImageCardState = (imgElement, state, message = '') => {
+            const { cardElement, statusElement, backdropElement, overlayElement } = findLocalImageCardElements(imgElement);
+            if (!cardElement) {
+                return;
+            }
+
+            cardElement.dataset.localImageState = state;
+            const isReady = state === 'ready';
+
+            if (backdropElement instanceof HTMLElement) {
+                backdropElement.style.display = isReady ? 'none' : 'block';
+            }
+
+            if (overlayElement instanceof HTMLElement) {
+                overlayElement.style.display = isReady ? 'none' : 'flex';
+            }
+
+            if (statusElement instanceof HTMLElement) {
+                if (isReady) {
+                    statusElement.style.display = 'none';
+                    statusElement.textContent = '';
+                } else {
+                    statusElement.style.display = 'block';
+                    statusElement.textContent = message;
                 }
             }
         };
@@ -551,13 +606,18 @@ createApp({
             }
 
             try {
-                const { blob, source } = await getLocalImageBlob(cacheKey, imageUrl);
+                const cachedImage = await getLocalCachedImageBlob(cacheKey);
+                if (!cachedImage) {
+                    updateLocalImageCardState(imgElement, 'missing', '本地缓存中没有这张图片，请手动重新生成。');
+                    return;
+                }
+
+                const { blob, source } = cachedImage;
                 assignLocalImageObjectUrl(imgElement, URL.createObjectURL(blob), source);
+                updateLocalImageCardState(imgElement, 'ready');
             } catch (error) {
                 console.error('加载本地生成图片失败:', error);
-                imgElement.dataset.localImageSource = 'error';
-                imgElement.alt = '生成图片失败';
-                imgElement.removeAttribute('data-local-image-url');
+                updateLocalImageCardState(imgElement, 'error', '读取本地缓存失败，请手动重新生成。');
             }
         };
 
@@ -568,6 +628,59 @@ createApp({
                 });
             };
         }
+
+        const hasLocalImagePrompt = (content) => {
+            if (!content || settings.imageGenProvider !== 'local-api') {
+                return false;
+            }
+            const mainContent = parseCot(content).main || content;
+            return /<image>\s*image###([\s\S]*?)###\s*<\/image>/i.test(mainContent) || /image###([\s\S]*?)###/i.test(mainContent);
+        };
+
+        const getMessageLocalImageElements = (messageIndex) => {
+            if (typeof document === 'undefined') {
+                return [];
+            }
+            return Array.from(document.querySelectorAll(`[data-chat-message-index="${messageIndex}"] img[data-local-image-url]`))
+                .filter((imgElement) => imgElement instanceof HTMLImageElement);
+        };
+
+        const regenerateMessageImages = async (messageIndex) => {
+            const imageElements = getMessageLocalImageElements(messageIndex);
+            if (imageElements.length === 0) {
+                showToast('当前消息里没有可重新生成的图片，或该消息暂未渲染。', 'info');
+                return;
+            }
+
+            await Promise.all(imageElements.map(async (imgElement) => {
+                const imageUrl = imgElement.dataset.localImageUrl;
+                const cacheKey = imgElement.dataset.localImageKey || imageUrl;
+                if (!imageUrl) {
+                    updateLocalImageCardState(imgElement, 'error', '生成地址缺失，无法重新生成。');
+                    return;
+                }
+
+                updateLocalImageCardState(imgElement, 'loading', '正在重新生成图片，请稍候...');
+                try {
+                    const previousObjectUrl = imgElement.dataset.objectUrl;
+                    if (previousObjectUrl && previousObjectUrl.startsWith('blob:')) {
+                        URL.revokeObjectURL(previousObjectUrl);
+                    }
+
+                    await removeCachedLocalImageBlob(cacheKey);
+                    delete imgElement.dataset.objectUrl;
+                    delete imgElement.dataset.localImageSource;
+                    imgElement.src = LOCAL_IMAGE_PLACEHOLDER;
+
+                    const { blob, source } = await requestLocalImageBlob(cacheKey, imageUrl);
+                    assignLocalImageObjectUrl(imgElement, URL.createObjectURL(blob), source);
+                    updateLocalImageCardState(imgElement, 'ready');
+                } catch (error) {
+                    console.error('重新生成本地图片失败:', error);
+                    updateLocalImageCardState(imgElement, 'error', '重新生成失败，请稍后再试。');
+                }
+            }));
+        };
 
         const hydratePendingLocalGeneratedImages = () => {
             if (typeof document === 'undefined') {
@@ -611,7 +724,7 @@ createApp({
             const imageUrl = `${getImageGenServiceBaseUrl()}/generate-direct?${query.toString()}`;
             const escapedImageUrl = escapeHtmlAttribute(imageUrl);
             const escapedCacheKey = escapeHtmlAttribute(`local-api:${imageUrl}`);
-            return `<div style="width: auto; height: auto; max-width: 100%; border: 8px solid transparent; background-image: linear-gradient(45deg, #FFC9D9, #CCE5FF); position: relative; border-radius: 16px; overflow: hidden; display: flex; justify-content: center; align-items: center; animation: gradientBG 3s ease infinite; box-shadow: 0 4px 15px rgba(204,229,255,0.3);"><div style="background: rgba(255,255,255,0.85); backdrop-filter: blur(5px); width: 100%; height: 100%; position: absolute; top: 0; left: 0;"></div><img src="${LOCAL_IMAGE_PLACEHOLDER}" data-local-image-url="${escapedImageUrl}" data-local-image-key="${escapedCacheKey}" alt="生成图片（工作流输入512x512，输出1744x1744）" style="max-width: 100%; height: auto; width: auto; display: block; object-fit: contain; transition: transform 0.3s ease; position: relative; z-index: 1;" loading="lazy" decoding="async" referrerpolicy="no-referrer"></div><style>@keyframes gradientBG {0% {background-image: linear-gradient(45deg, #FFC9D9, #CCE5FF);}50% {background-image: linear-gradient(225deg, #FFC9D9, #CCE5FF);}100% {background-image: linear-gradient(45deg, #FFC9D9, #CCE5FF);}}</style>`;
+            return `<div data-local-image-card="1" data-local-image-state="missing" style="width: auto; height: auto; max-width: 100%; border: 8px solid transparent; background-image: linear-gradient(45deg, #FFC9D9, #CCE5FF); position: relative; border-radius: 16px; overflow: hidden; display: flex; justify-content: center; align-items: center; animation: gradientBG 3s ease infinite; box-shadow: 0 4px 15px rgba(204,229,255,0.3);"><div data-local-image-backdrop="1" style="background: rgba(255,255,255,0.85); backdrop-filter: blur(5px); width: 100%; height: 100%; position: absolute; top: 0; left: 0;"></div><img src="${LOCAL_IMAGE_PLACEHOLDER}" data-local-image-url="${escapedImageUrl}" data-local-image-key="${escapedCacheKey}" alt="生成图片（工作流输入512x512，输出1744x1744）" style="max-width: 100%; height: auto; width: auto; display: block; object-fit: contain; transition: transform 0.3s ease; position: relative; z-index: 1;" loading="lazy" decoding="async" referrerpolicy="no-referrer"><div data-local-image-overlay="1" style="position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 16px; text-align: center; background: linear-gradient(180deg, rgba(255,255,255,0.18), rgba(255,255,255,0.72));"><div data-local-image-status style="font-size: 13px; line-height: 1.5; color: #334155; font-weight: 600;">本地缓存中没有这张图片，可使用消息下方的重新生成图像按钮。</div></div></div><style>@keyframes gradientBG {0% {background-image: linear-gradient(45deg, #FFC9D9, #CCE5FF);}50% {background-image: linear-gradient(225deg, #FFC9D9, #CCE5FF);}100% {background-image: linear-gradient(45deg, #FFC9D9, #CCE5FF);}}</style>`;
         };
 
         const replaceLocalImageBlocks = (text) => {
@@ -5980,7 +6093,7 @@ ${textContent}`;
             fetchModels, selectModel, sendMessage, autoResizeInput, stopGeneration, clearChat,
             handleConfirm, handleCancel, // Export handlers
             manualSave,
-            copyMessage, deleteMessage, regenerateMessage, printAIRequestLogs,
+            copyMessage, deleteMessage, regenerateMessage, regenerateMessageImages, hasLocalImagePrompt, printAIRequestLogs,
             editMessage, saveEditMessage, cancelEditMessage,
             editSummaryMessage, saveSummaryMessage, cancelEditSummary,
             createNewCharacter, editCharacter, saveCharacter, deleteCharacter, selectCharacter,

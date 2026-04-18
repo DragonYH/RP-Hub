@@ -529,6 +529,7 @@
                     </div>
 
                     <div v-else v-for="(msg, index) in chatHistory" :key="index" ref="messageElements"
+                        :data-chat-message-index="index"
                         :data-role="msg.role"
                         v-show="!(msg.role === 'assistant' && index === chatHistory.length - 1 && isThinking && !(parseCot(msg.content).cot || parseCot(msg.content).main))"
                         :class="['flex w-full scroll-reveal-container', msg.isSelf ? 'justify-end scroll-reveal-right' : 'justify-start scroll-reveal-left']"
@@ -833,6 +834,18 @@
                                                 viewBox="0 0 24 24">
                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                                     d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
+                                                </path>
+                                            </svg>
+                                        </button>
+                                        <button v-if="hasLocalImagePrompt(msg.content) && index >= chatHistory.length - (settings.renderLayerLimit > 100 ? 99999 : settings.renderLayerLimit)"
+                                            @click="regenerateMessageImages(index)"
+                                            class="p-1 md:p-1.5 text-gray-500 hover:text-primary-600 bg-white/90 backdrop-blur-sm rounded-full border border-gray-200/60 shadow-sm hover:bg-white hover:scale-105 hover:shadow transition-all msg-action-btn"
+                                            title="重新生成图像"
+                                            aria-label="重新生成图像">
+                                            <svg class="w-3.5 h-3.5 md:w-4 md:h-4" fill="none" stroke="currentColor"
+                                                viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                    d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z">
                                                 </path>
                                             </svg>
                                         </button>
