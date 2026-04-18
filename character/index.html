@@ -1354,7 +1354,9 @@
                                 <div class="avatar placeholder shrink-0">
                                     <div
                                         class="bg-gradient-to-br from-neutral to-neutral-focus text-neutral-content rounded-xl w-10 h-10 shadow-sm ring-1 ring-base-content/5">
-                                        <img v-if="char.avatar" :src="char.avatar" :key="char.avatar"
+                                        <img v-if="getSidebarAvatarSrc(char)"
+                                            :src="getSidebarAvatarSrc(char)"
+                                            :key="getSidebarAvatarSrc(char)"
                                             class="w-full h-full object-cover rounded-xl" loading="lazy" />
                                         <span v-else class="text-lg font-bold">{{ (char.name ||
                                             'A').charAt(0).toUpperCase() }}</span>
@@ -2699,6 +2701,22 @@
                     showToast('头像加载失败', 'error');
                 };
 
+                const getSidebarAvatarSrc = (char) => {
+                    const avatar = typeof char?.avatar === 'string' ? char.avatar : '';
+                    if (!avatar) return '';
+
+                    const isInlineAvatar = avatar.startsWith('data:') || avatar.startsWith('blob:');
+                    if (isInlineAvatar) return avatar;
+
+                    // 当前角色详情区会先加载远程生成图，再回写为 base64。
+                    // 这里先跳过侧边栏同一个远程 URL，避免 generate-direct 被并发请求两次。
+                    if (char._index === currentCharacterIndex.value) {
+                        return '';
+                    }
+
+                    return avatar;
+                };
+
                 // Watch avatar changes to trigger loading state
                 watch(() => currentCharacter.value.avatar, (newVal) => {
                     if (newVal && !newVal.startsWith('data:')) {
@@ -3610,6 +3628,7 @@ JSON 字段（世界书/正则脚本）必须输出为合法的 JSON 数组，**
 
                     autoResize,
                     isAvatarLoading,
+                    getSidebarAvatarSrc,
                     onAvatarLoad,
                     onAvatarError
                 };
