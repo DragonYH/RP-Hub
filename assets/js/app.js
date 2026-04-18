@@ -645,11 +645,19 @@ createApp({
                 .filter((imgElement) => imgElement instanceof HTMLImageElement);
         };
 
-        const regenerateMessageImages = async (messageIndex) => {
+        const loadMessageLocalImages = async (messageIndex, options = {}) => {
+            const {
+                forceRegenerate = false,
+                suppressEmptyToast = false,
+                loadingMessage = forceRegenerate ? '正在重新生成图片，请稍候...' : '正在生成图片，请稍候...',
+                errorMessage = forceRegenerate ? '重新生成失败，请稍后再试。' : '生成失败，请稍后再试。'
+            } = options;
             const imageElements = getMessageLocalImageElements(messageIndex);
             if (imageElements.length === 0) {
-                showToast('当前消息里没有可重新生成的图片，或该消息暂未渲染。', 'info');
-                return;
+                if (!suppressEmptyToast) {
+                    showToast('当前消息里没有可重新生成的图片，或该消息暂未渲染。', 'info');
+                }
+                return false;
             }
 
             await Promise.all(imageElements.map(async (imgElement) => {
@@ -660,26 +668,54 @@ createApp({
                     return;
                 }
 
-                updateLocalImageCardState(imgElement, 'loading', '正在重新生成图片，请稍候...');
+                updateLocalImageCardState(imgElement, 'loading', loadingMessage);
                 try {
                     const previousObjectUrl = imgElement.dataset.objectUrl;
-                    if (previousObjectUrl && previousObjectUrl.startsWith('blob:')) {
-                        URL.revokeObjectURL(previousObjectUrl);
-                    }
+                    if (forceRegenerate) {
+                        if (previousObjectUrl && previousObjectUrl.startsWith('blob:')) {
+                            URL.revokeObjectURL(previousObjectUrl);
+                        }
 
-                    await removeCachedLocalImageBlob(cacheKey);
-                    delete imgElement.dataset.objectUrl;
-                    delete imgElement.dataset.localImageSource;
-                    imgElement.src = LOCAL_IMAGE_PLACEHOLDER;
+                        await removeCachedLocalImageBlob(cacheKey);
+                        delete imgElement.dataset.objectUrl;
+                        delete imgElement.dataset.localImageSource;
+                        imgElement.src = LOCAL_IMAGE_PLACEHOLDER;
+                    }
 
                     const { blob, source } = await requestLocalImageBlob(cacheKey, imageUrl);
                     assignLocalImageObjectUrl(imgElement, URL.createObjectURL(blob), source);
+                    imgElement.dataset.localImageHydrated = '1';
                     updateLocalImageCardState(imgElement, 'ready');
                 } catch (error) {
-                    console.error('重新生成本地图片失败:', error);
-                    updateLocalImageCardState(imgElement, 'error', '重新生成失败，请稍后再试。');
+                    console.error(forceRegenerate ? '重新生成本地图片失败:' : '自动生成本地图片失败:', error);
+                    updateLocalImageCardState(imgElement, 'error', errorMessage);
                 }
             }));
+            return true;
+        };
+
+        const scheduleAutoLoadMessageImages = (messageIndex, attempt = 0) => {
+            if (typeof window === 'undefined') {
+                return;
+            }
+
+            window.requestAnimationFrame(() => {
+                loadMessageLocalImages(messageIndex, {
+                    suppressEmptyToast: true
+                }).then((loaded) => {
+                    if (!loaded && attempt < 5) {
+                        scheduleAutoLoadMessageImages(messageIndex, attempt + 1);
+                    }
+                }).catch((error) => {
+                    console.error('调度自动生成本地图片失败:', error);
+                });
+            });
+        };
+
+        const regenerateMessageImages = async (messageIndex) => {
+            await loadMessageLocalImages(messageIndex, {
+                forceRegenerate: true
+            });
         };
 
         const hydratePendingLocalGeneratedImages = () => {
@@ -2535,6 +2571,11 @@ ${rawHtml}
                         name: currentCharacter.value.name,
                         content: currentCharacter.value.first_mes
                     });
+                    if (hasLocalImagePrompt(currentCharacter.value.first_mes)) {
+                        nextTick(() => {
+                            scheduleAutoLoadMessageImages(0);
+                        });
+                    }
                 }
                 memories.value = [];
                 saveData();
@@ -3743,6 +3784,14 @@ ${rawHtml}
                             if (recentGenerationTimes.value.length > 5) {
                                 recentGenerationTimes.value.shift();
                             }
+                            if (hasLocalImagePrompt(assistantMessage.content)) {
+                                const assistantMessageIndex = chatHistory.value.indexOf(assistantMessage);
+                                if (assistantMessageIndex !== -1) {
+                                    nextTick(() => {
+                                        scheduleAutoLoadMessageImages(assistantMessageIndex);
+                                    });
+                                }
+                            }
 
                             // -----------------------------
                         }
@@ -4425,6 +4474,11 @@ ${textContent}`;
                             name: char.name,
                             content: char.first_mes
                         });
+                        if (hasLocalImagePrompt(char.first_mes)) {
+                            nextTick(() => {
+                                scheduleAutoLoadMessageImages(0);
+                            });
+                        }
                     }
                 }
             } catch (e) {
@@ -5752,6 +5806,11 @@ ${textContent}`;
                             name: char.name,
                             content: char.first_mes
                         }];
+                        if (hasLocalImagePrompt(char.first_mes)) {
+                            nextTick(() => {
+                                scheduleAutoLoadMessageImages(0);
+                            });
+                        }
                     } else {
                         chatHistory.value = [];
                     }
